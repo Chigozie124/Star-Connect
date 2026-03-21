@@ -9,13 +9,11 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
 
-// ===== CONFIG =====
 const IMGBB_API_KEY = process.env.IMGBB_API_KEY || "";
 const GMAIL_USER = process.env.GMAIL_USER || "";
 const GMAIL_APP_PASSWORD = process.env.GMAIL_APP_PASSWORD || "";
 const PORT = process.env.PORT || 3000;
 
-// ===== MAILER =====
 const transporter = nodemailer.createTransport({
   service: "gmail",
   auth: {
@@ -24,7 +22,6 @@ const transporter = nodemailer.createTransport({
   }
 });
 
-// ===== MULTER =====
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
@@ -33,11 +30,9 @@ const upload = multer({
   }
 });
 
-// ===== CACHE =====
 let cache = { at: 0, data: null };
 const CACHE_MS = 60 * 1000;
 
-// ===== HELPERS =====
 function fetchFxUsd() {
   return fetch("https://open.er-api.com/v6/latest/USD")
     .then((res) => res.json())
@@ -95,6 +90,10 @@ async function sendOrderEmail(order) {
     .map((p, i) => `<li><a href="${p.url}" target="_blank">Proof ${i + 1}: ${p.fileName || p.url}</a></li>`)
     .join("");
 
+  const customFieldsHtml = (order.customFields || [])
+    .map((field) => `<p><b>${field.label}:</b> ${field.value || "-"}</p>`)
+    .join("");
+
   const html = `
     <div style="font-family:Arial,sans-serif;line-height:1.6;color:#111">
       <h2>New Star Connect Order</h2>
@@ -102,6 +101,7 @@ async function sendOrderEmail(order) {
       <p><b>Email:</b> ${order.userEmail || "-"}</p>
       <p><b>Celebrity:</b> ${order.celebName || "-"}</p>
       <p><b>Service:</b> ${order.serviceName || "-"}</p>
+      <p><b>Service ID:</b> ${order.serviceId || "-"}</p>
       <p><b>Currency:</b> ${order.currency || "-"}</p>
       <p><b>USD Amount:</b> ${order.usdAmount || "-"}</p>
       <p><b>BTC Amount:</b> ${order.btcAmount || "-"}</p>
@@ -111,6 +111,9 @@ async function sendOrderEmail(order) {
       <p><b>Gift Card Value:</b> ${order.giftValue || "-"}</p>
       <p><b>Gift Card Code:</b> ${order.giftCode || "-"}</p>
       <p><b>Notes:</b> ${order.notes || "-"}</p>
+
+      ${customFieldsHtml ? `<h3>Extra Details</h3>${customFieldsHtml}` : ""}
+
       <h3>Proof Links</h3>
       <ul>${proofLinks || "<li>No proof uploaded</li>"}</ul>
     </div>
@@ -124,7 +127,6 @@ async function sendOrderEmail(order) {
   });
 }
 
-// ===== ROUTES =====
 app.get("/", (req, res) => {
   res.send("Star Connect API is running");
 });
