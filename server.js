@@ -9,8 +9,11 @@ const rateLimit = require("express-rate-limit");
 const app = express();
 
 const IMGBB_API_KEY = process.env.IMGBB_API_KEY || "";
-const GMAIL_USER = process.env.GMAIL_USER || "";
-const GMAIL_APP_PASSWORD = process.env.GMAIL_APP_PASSWORD || "";
+const SMTP_HOST = process.env.SMTP_HOST || "";
+const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
+const SMTP_USER = process.env.SMTP_USER || "";
+const SMTP_PASS = process.env.SMTP_PASS || "";
+const MAIL_FROM = process.env.MAIL_FROM || "";
 const PORT = Number(process.env.PORT || 3000);
 
 const FRONTEND_ORIGINS = (process.env.FRONTEND_ORIGINS || "")
@@ -23,6 +26,8 @@ const corsOptions = {
     if (!origin) return callback(null, true);
     if (!FRONTEND_ORIGINS.length) return callback(null, true);
     if (FRONTEND_ORIGINS.includes(origin)) return callback(null, true);
+
+    console.error("Blocked CORS origin:", origin);
     return callback(new Error("CORS origin not allowed"));
   }
 };
@@ -55,16 +60,18 @@ const uploadLimiter = rateLimit({
 app.use("/api/", apiLimiter);
 
 const transporter = nodemailer.createTransport({
-  service: "gmail",
+  host: SMTP_HOST,
+  port: SMTP_PORT,
+  secure: false,
   auth: {
-    user: GMAIL_USER,
-    pass: GMAIL_APP_PASSWORD
+    user: SMTP_USER,
+    pass: SMTP_PASS
   }
 });
 
 async function verifyMailer() {
-  if (!GMAIL_USER || !GMAIL_APP_PASSWORD) {
-    console.warn("Mailer not configured: missing Gmail credentials");
+  if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS || !MAIL_FROM) {
+    console.warn("Mailer not configured: missing SMTP credentials");
     return;
   }
 
@@ -97,8 +104,11 @@ const CACHE_MS = 60 * 1000;
 function requireEnv() {
   const missing = [];
   if (!IMGBB_API_KEY) missing.push("IMGBB_API_KEY");
-  if (!GMAIL_USER) missing.push("GMAIL_USER");
-  if (!GMAIL_APP_PASSWORD) missing.push("GMAIL_APP_PASSWORD");
+  if (!SMTP_HOST) missing.push("SMTP_HOST");
+  if (!SMTP_PORT) missing.push("SMTP_PORT");
+  if (!SMTP_USER) missing.push("SMTP_USER");
+  if (!SMTP_PASS) missing.push("SMTP_PASS");
+  if (!MAIL_FROM) missing.push("MAIL_FROM");
 
   if (missing.length) {
     console.warn("Missing env vars:", missing.join(", "));
@@ -197,8 +207,8 @@ function validateOrder(order) {
 }
 
 async function sendOrderEmail(order) {
-  if (!GMAIL_USER || !GMAIL_APP_PASSWORD) {
-    throw new Error("Email credentials are missing in .env");
+  if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS || !MAIL_FROM) {
+    throw new Error("SMTP credentials are missing in environment variables");
   }
 
   validateOrder(order);
@@ -285,8 +295,8 @@ async function sendOrderEmail(order) {
   `;
 
   const info = await transporter.sendMail({
-    from: `"Star Connect" <${GMAIL_USER}>`,
-    to: GMAIL_USER,
+    from: `"Star Connect" <${MAIL_FROM}>`,
+    to: MAIL_FROM,
     subject: `New Star Connect Order - ${safeOrder.serviceName || "Booking"}`,
     html
   });
@@ -304,7 +314,7 @@ app.get("/health", (req, res) => {
     ok: true,
     uptime: process.uptime(),
     imgbbConfigured: Boolean(IMGBB_API_KEY),
-    emailConfigured: Boolean(GMAIL_USER && GMAIL_APP_PASSWORD)
+    emailConfigured: Boolean(SMTP_HOST && SMTP_USER && SMTP_PASS && MAIL_FROM)
   });
 });
 
@@ -436,4 +446,3 @@ app.listen(PORT, async () => {
   await verifyMailer();
   console.log("Star Connect API running on port", PORT);
 });
-
