@@ -3,16 +3,12 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
-const nodemailer = require("nodemailer");
 const rateLimit = require("express-rate-limit");
 
 const app = express();
 
 const IMGBB_API_KEY = process.env.IMGBB_API_KEY || "";
-const SMTP_HOST = process.env.SMTP_HOST || "";
-const SMTP_PORT = Number(process.env.SMTP_PORT || 465);
-const SMTP_USER = process.env.SMTP_USER || "";
-const SMTP_PASS = process.env.SMTP_PASS || "";
+const BREVO_API_KEY = process.env.BREVO_API_KEY || "";
 const MAIL_FROM = process.env.MAIL_FROM || "";
 const PORT = Number(process.env.PORT || 3000);
 
@@ -59,42 +55,6 @@ const uploadLimiter = rateLimit({
 
 app.use("/api/", apiLimiter);
 
-const transporter = nodemailer.createTransport({
-  host: SMTP_HOST,
-  port: Number(SMTP_PORT || 465),
-  secure: true,
-  auth: {
-    user: SMTP_USER,
-    pass: SMTP_PASS
-  },
-  tls: {
-    minVersion: "TLSv1.2",
-    rejectUnauthorized: false
-  },
-  connectionTimeout: 15000,
-  greetingTimeout: 15000,
-  socketTimeout: 20000,
-  logger: true,
-  debug: true
-});
-
-async function verifyMailer() {
-  if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS || !MAIL_FROM) {
-    console.warn("Mailer not configured: missing SMTP credentials");
-    return false;
-  }
-
-  try {
-    console.log("Verifying mailer...");
-    await transporter.verify();
-    console.log("Mailer verified successfully");
-    return true;
-  } catch (err) {
-    console.error("Mailer verification failed:", err.message);
-    return false;
-  }
-}
-
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
@@ -116,10 +76,7 @@ const CACHE_MS = 60 * 1000;
 function requireEnv() {
   const missing = [];
   if (!IMGBB_API_KEY) missing.push("IMGBB_API_KEY");
-  if (!SMTP_HOST) missing.push("SMTP_HOST");
-  if (!SMTP_PORT) missing.push("SMTP_PORT");
-  if (!SMTP_USER) missing.push("SMTP_USER");
-  if (!SMTP_PASS) missing.push("SMTP_PASS");
+  if (!BREVO_API_KEY) missing.push("BREVO_API_KEY");
   if (!MAIL_FROM) missing.push("MAIL_FROM");
 
   if (missing.length) {
@@ -154,12 +111,8 @@ function withTimeout(promise, ms, message) {
   ]);
 }
 
-async function ensureMailerReady() {
-  if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS || !MAIL_FROM) {
-    throw new Error("SMTP credentials are missing in environment variables");
-  }
-
-  await withTimeout(transporter.verify(), 15000, "SMTP verify timed out");
+function isBrevoConfigured() {
+  return Boolean(BREVO_API_KEY && MAIL_FROM);
 }
 
 function fetchFxUsd() {
@@ -316,37 +269,78 @@ function buildOrderEmailHtml(order) {
   `;
 }
 
+async function sendViaBrevo({ to, subject, html }) {
+  if (!isBrevoConfigured()) {
+    throw new Error("Brevo API is not configured");
+  }
+
+  const payload = {
+    sender: {
+      email: MAIL_FROM,
+      name: "Star Connect"
+    },
+    to: [
+      {
+        email: to
+      }
+    ],
+    subject,
+    htmlContent: html
+  };
+
+  console.log("Sending email through Brevo API...");
+
+  const res = await withTimeout(
+    fetch("https://api.brevo.com/v3/smtp/email", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "api-key": BREVO_API_KEY
+      },
+      body: JSON.stringify(payload)
+    }),
+    15000,
+    "Brevo API request timed out"
+  );
+
+  const text = await res.text();
+  let data = null;
+
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = { raw: text };
+  }
+
+  if (!res.ok) {
+    console.error("Brevo API error response:", data);
+    throw new Error(data?.message || data?.code || "Brevo email send failed");
+  }
+
+  console.log("Brevo email sent:", data);
+  return data;
+}
+
 async function sendOrderEmail(order) {
+  if (!BREVO_API_KEY || !MAIL_FROM) {
+    throw new Error("Brevo API credentials are missing in environment variables");
+  }
+
   validateOrder(order);
 
   console.log("Preparing to send order email for:", order.serviceName || "unknown service");
-  console.log("SMTP config check:", {
-    host: SMTP_HOST,
-    port: SMTP_PORT,
-    user: SMTP_USER,
-    hasPass: !!SMTP_PASS,
+  console.log("Brevo config check:", {
+    hasApiKey: !!BREVO_API_KEY,
     from: MAIL_FROM
   });
 
-  await ensureMailerReady();
-
   const html = buildOrderEmailHtml(order);
 
-  console.log("Sending email now...");
-
-  const info = await withTimeout(
-    transporter.sendMail({
-      from: `"Star Connect" <${MAIL_FROM}>`,
-      to: MAIL_FROM,
-      subject: `New Star Connect Order - ${normalizeText(order.serviceName, 200) || "Booking"}`,
-      html
-    }),
-    20000,
-    "Email sending timed out"
-  );
-
-  console.log("Email sent:", info.messageId);
-  return info;
+  return await sendViaBrevo({
+    to: MAIL_FROM,
+    subject: `New Star Connect Order - ${normalizeText(order.serviceName, 200) || "Booking"}`,
+    html
+  });
 }
 
 app.get("/", (req, res) => {
@@ -354,23 +348,12 @@ app.get("/", (req, res) => {
 });
 
 app.get("/health", async (req, res) => {
-  let mailerReady = false;
-
-  if (SMTP_HOST && SMTP_USER && SMTP_PASS && MAIL_FROM) {
-    try {
-      await withTimeout(transporter.verify(), 8000, "SMTP verify timed out");
-      mailerReady = true;
-    } catch (err) {
-      mailerReady = false;
-    }
-  }
-
   res.json({
     ok: true,
     uptime: process.uptime(),
     imgbbConfigured: Boolean(IMGBB_API_KEY),
-    emailConfigured: Boolean(SMTP_HOST && SMTP_USER && SMTP_PASS && MAIL_FROM),
-    mailerReady
+    emailConfigured: Boolean(BREVO_API_KEY && MAIL_FROM),
+    mailerReady: Boolean(BREVO_API_KEY && MAIL_FROM)
   });
 });
 
@@ -445,7 +428,7 @@ app.post("/api/send-order-email", async (req, res) => {
     return res.json({
       success: true,
       message: "Order email sent",
-      messageId: info.messageId || null
+      data: info || null
     });
   } catch (err) {
     console.error("EMAIL ERROR:", err);
@@ -458,23 +441,20 @@ app.post("/api/send-order-email", async (req, res) => {
 
 app.get("/api/test-email", async (req, res) => {
   try {
-    await ensureMailerReady();
+    if (!BREVO_API_KEY || !MAIL_FROM) {
+      throw new Error("Brevo API credentials are missing");
+    }
 
-    const info = await withTimeout(
-      transporter.sendMail({
-        from: `"Star Connect" <${MAIL_FROM}>`,
-        to: MAIL_FROM,
-        subject: "Star Connect test email",
-        html: "<p>If you got this, Brevo SMTP is working.</p>"
-      }),
-      20000,
-      "Test email sending timed out"
-    );
+    const info = await sendViaBrevo({
+      to: MAIL_FROM,
+      subject: "Star Connect test email",
+      html: "<p>If you got this, Brevo API email is working.</p>"
+    });
 
     return res.json({
       success: true,
       message: "Test email sent successfully",
-      messageId: info.messageId || null
+      data: info || null
     });
   } catch (err) {
     console.error("TEST EMAIL ERROR:", err);
@@ -524,6 +504,6 @@ app.use((err, req, res, next) => {
 
 app.listen(PORT, async () => {
   requireEnv();
-  await verifyMailer();
+  console.log("Brevo API configured:", Boolean(BREVO_API_KEY && MAIL_FROM));
   console.log("Star Connect API running on port", PORT);
 });
