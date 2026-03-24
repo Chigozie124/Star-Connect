@@ -61,25 +61,38 @@ app.use("/api/", apiLimiter);
 
 const transporter = nodemailer.createTransport({
   host: SMTP_HOST,
-  port: SMTP_PORT,
+  port: Number(SMTP_PORT || 587),
   secure: false,
+  requireTLS: true,
   auth: {
     user: SMTP_USER,
     pass: SMTP_PASS
-  }
+  },
+  tls: {
+    minVersion: "TLSv1.2",
+    rejectUnauthorized: false
+  },
+  connectionTimeout: 10000,
+  greetingTimeout: 10000,
+  socketTimeout: 15000,
+  logger: true,
+  debug: true
 });
 
 async function verifyMailer() {
   if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS || !MAIL_FROM) {
     console.warn("Mailer not configured: missing SMTP credentials");
-    return;
+    return false;
   }
 
   try {
+    console.log("Verifying mailer...");
     await transporter.verify();
     console.log("Mailer verified successfully");
+    return true;
   } catch (err) {
     console.error("Mailer verification failed:", err.message);
+    return false;
   }
 }
 
@@ -131,6 +144,23 @@ function normalizeText(value, max = 5000) {
 
 function normalizeArray(value) {
   return Array.isArray(value) ? value : [];
+}
+
+function withTimeout(promise, ms, message) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(message || "Operation timed out")), ms)
+    )
+  ]);
+}
+
+async function ensureMailerReady() {
+  if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS || !MAIL_FROM) {
+    throw new Error("SMTP credentials are missing in environment variables");
+  }
+
+  await withTimeout(transporter.verify(), 10000, "SMTP verify timed out");
 }
 
 function fetchFxUsd() {
@@ -206,15 +236,7 @@ function validateOrder(order) {
   }
 }
 
-async function sendOrderEmail(order) {
-  if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS || !MAIL_FROM) {
-    throw new Error("SMTP credentials are missing in environment variables");
-  }
-
-  validateOrder(order);
-
-  console.log("Preparing to send order email for:", order.serviceName || "unknown service");
-
+function buildOrderEmailHtml(order) {
   const safeOrder = {
     userName: escapeHtml(normalizeText(order.userName, 200)),
     userEmail: escapeHtml(normalizeText(order.userEmail, 200)),
@@ -260,7 +282,7 @@ async function sendOrderEmail(order) {
     })
     .join("");
 
-  const html = `
+  return `
     <div style="font-family:Arial,sans-serif;line-height:1.6;color:#111">
       <h2>New Star Connect Order</h2>
       <p><b>User:</b> ${safeOrder.userName || "-"}</p>
@@ -293,13 +315,36 @@ async function sendOrderEmail(order) {
       <ul>${proofLinks || "<li>No proof uploaded</li>"}</ul>
     </div>
   `;
+}
 
-  const info = await transporter.sendMail({
-    from: `"Star Connect" <${MAIL_FROM}>`,
-    to: MAIL_FROM,
-    subject: `New Star Connect Order - ${safeOrder.serviceName || "Booking"}`,
-    html
+async function sendOrderEmail(order) {
+  validateOrder(order);
+
+  console.log("Preparing to send order email for:", order.serviceName || "unknown service");
+  console.log("SMTP config check:", {
+    host: SMTP_HOST,
+    port: SMTP_PORT,
+    user: SMTP_USER,
+    hasPass: !!SMTP_PASS,
+    from: MAIL_FROM
   });
+
+  await ensureMailerReady();
+
+  const html = buildOrderEmailHtml(order);
+
+  console.log("Sending email now...");
+
+  const info = await withTimeout(
+    transporter.sendMail({
+      from: `"Star Connect" <${MAIL_FROM}>`,
+      to: MAIL_FROM,
+      subject: `New Star Connect Order - ${normalizeText(order.serviceName, 200) || "Booking"}`,
+      html
+    }),
+    15000,
+    "Email sending timed out"
+  );
 
   console.log("Email sent:", info.messageId);
   return info;
@@ -309,12 +354,24 @@ app.get("/", (req, res) => {
   res.send("Star Connect API is running");
 });
 
-app.get("/health", (req, res) => {
+app.get("/health", async (req, res) => {
+  let mailerReady = false;
+
+  if (SMTP_HOST && SMTP_USER && SMTP_PASS && MAIL_FROM) {
+    try {
+      await withTimeout(transporter.verify(), 5000, "SMTP verify timed out");
+      mailerReady = true;
+    } catch (err) {
+      mailerReady = false;
+    }
+  }
+
   res.json({
     ok: true,
     uptime: process.uptime(),
     imgbbConfigured: Boolean(IMGBB_API_KEY),
-    emailConfigured: Boolean(SMTP_HOST && SMTP_USER && SMTP_PASS && MAIL_FROM)
+    emailConfigured: Boolean(SMTP_HOST && SMTP_USER && SMTP_PASS && MAIL_FROM),
+    mailerReady
   });
 });
 
@@ -383,23 +440,48 @@ app.post("/api/send-order-email", async (req, res) => {
   try {
     const order = req.body || {};
 
-    const timeoutMs = 15000;
-    const sendPromise = sendOrderEmail(order);
-    const timeoutPromise = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error("Email sending timed out")), timeoutMs)
-    );
-
-    await Promise.race([sendPromise, timeoutPromise]);
+    console.log("Incoming order email request");
+    const info = await sendOrderEmail(order);
 
     return res.json({
       success: true,
-      message: "Order email sent"
+      message: "Order email sent",
+      messageId: info.messageId || null
     });
   } catch (err) {
     console.error("EMAIL ERROR:", err);
     return res.status(400).json({
       error: "email_failed",
       message: err.message || "Failed to send order email"
+    });
+  }
+});
+
+app.get("/api/test-email", async (req, res) => {
+  try {
+    await ensureMailerReady();
+
+    const info = await withTimeout(
+      transporter.sendMail({
+        from: `"Star Connect" <${MAIL_FROM}>`,
+        to: MAIL_FROM,
+        subject: "Star Connect test email",
+        html: "<p>If you got this, Brevo SMTP is working.</p>"
+      }),
+      15000,
+      "Test email sending timed out"
+    );
+
+    return res.json({
+      success: true,
+      message: "Test email sent successfully",
+      messageId: info.messageId || null
+    });
+  } catch (err) {
+    console.error("TEST EMAIL ERROR:", err);
+    return res.status(500).json({
+      error: "test_email_failed",
+      message: err.message || "Test email failed"
     });
   }
 });
