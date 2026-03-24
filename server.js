@@ -10,7 +10,7 @@ const app = express();
 
 const IMGBB_API_KEY = process.env.IMGBB_API_KEY || "";
 const SMTP_HOST = process.env.SMTP_HOST || "";
-const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
+const SMTP_PORT = Number(process.env.SMTP_PORT || 465);
 const SMTP_USER = process.env.SMTP_USER || "";
 const SMTP_PASS = process.env.SMTP_PASS || "";
 const MAIL_FROM = process.env.MAIL_FROM || "";
@@ -61,9 +61,8 @@ app.use("/api/", apiLimiter);
 
 const transporter = nodemailer.createTransport({
   host: SMTP_HOST,
-  port: Number(SMTP_PORT || 587),
-  secure: false,
-  requireTLS: true,
+  port: Number(SMTP_PORT || 465),
+  secure: true,
   auth: {
     user: SMTP_USER,
     pass: SMTP_PASS
@@ -72,9 +71,9 @@ const transporter = nodemailer.createTransport({
     minVersion: "TLSv1.2",
     rejectUnauthorized: false
   },
-  connectionTimeout: 10000,
-  greetingTimeout: 10000,
-  socketTimeout: 15000,
+  connectionTimeout: 15000,
+  greetingTimeout: 15000,
+  socketTimeout: 20000,
   logger: true,
   debug: true
 });
@@ -160,7 +159,7 @@ async function ensureMailerReady() {
     throw new Error("SMTP credentials are missing in environment variables");
   }
 
-  await withTimeout(transporter.verify(), 10000, "SMTP verify timed out");
+  await withTimeout(transporter.verify(), 15000, "SMTP verify timed out");
 }
 
 function fetchFxUsd() {
@@ -342,7 +341,7 @@ async function sendOrderEmail(order) {
       subject: `New Star Connect Order - ${normalizeText(order.serviceName, 200) || "Booking"}`,
       html
     }),
-    15000,
+    20000,
     "Email sending timed out"
   );
 
@@ -359,7 +358,7 @@ app.get("/health", async (req, res) => {
 
   if (SMTP_HOST && SMTP_USER && SMTP_PASS && MAIL_FROM) {
     try {
-      await withTimeout(transporter.verify(), 5000, "SMTP verify timed out");
+      await withTimeout(transporter.verify(), 8000, "SMTP verify timed out");
       mailerReady = true;
     } catch (err) {
       mailerReady = false;
@@ -468,7 +467,7 @@ app.get("/api/test-email", async (req, res) => {
         subject: "Star Connect test email",
         html: "<p>If you got this, Brevo SMTP is working.</p>"
       }),
-      15000,
+      20000,
       "Test email sending timed out"
     );
 
